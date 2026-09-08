@@ -797,7 +797,10 @@ def parse():
         return jsonify({"error": "A description and an API key are both needed."})
 
     try:
-        return jsonify(llm_fill.describe_to_form(api_key, description))
+        values = llm_fill.describe_to_form(api_key, description,
+                                           MAX_ATOMS, MIN_REPEAT,
+                                           ATOMS_PER_CELL)
+        return jsonify(values)
     except ValueError as error:
         return jsonify({"error": str(error)})
 

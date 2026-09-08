@@ -14,8 +14,9 @@ side without knowing about each other. That is what lets it run on Cloud
 Run, which starts and stops containers as it likes.
 """
 
-from flask import Flask, request, render_template_string
+from flask import Flask, request, render_template_string, jsonify
 
+import llm_fill
 from sqs_builder import build_sqs, BASIS
 
 app = Flask(__name__)
@@ -251,7 +252,7 @@ PAGE = """
       margin-bottom: 24px;
     }
 
-    input[type=text], select {
+    input[type=text], input[type=password], textarea, select {
       background: var(--input-bg);
       border: 1px solid var(--input-border);
       border-radius: 8px;
@@ -267,12 +268,14 @@ PAGE = """
       font-family: 'Inter', sans-serif;
     }
 
-    input[type=text]:focus, select:focus {
+    input[type=text]:focus, input[type=password]:focus,
+    textarea:focus, select:focus {
       border-color: var(--accent);
       box-shadow: 0 0 0 1px var(--accent);
     }
 
-    input[type=text]:hover, select:hover {
+    input[type=text]:hover, input[type=password]:hover,
+    textarea:hover, select:hover {
       border-color: var(--input-border-hover);
     }
 
@@ -429,6 +432,23 @@ PAGE = """
 
     .problems ul { margin: 8px 0 0 0; padding-left: 22px; }
 
+    .assist {
+      border: 1px solid var(--input-border);
+      border-radius: 8px;
+      padding: 24px 28px;
+      margin-bottom: 8px;
+    }
+
+    .assist textarea {
+      width: 100%;
+      min-height: 80px;
+      resize: vertical;
+      line-height: 1.5;
+      font-family: 'Inter', sans-serif;
+    }
+
+    input.wide { width: 100%; max-width: 460px; }
+
     .hidden-text {
       display: none;
     }
@@ -451,6 +471,36 @@ PAGE = """
     no more than {{ max_atoms }} atoms. The search stops at the number of
     steps you set, or earlier if it reaches a perfect score.
   </p>
+
+  <div class="assist">
+    <h3 style="margin-top: 0;">Fill the form by describing it, optional</h3>
+    <p class="note small" style="margin-top: 0;">
+      You do not need this. Skip straight to the form below and fill the
+      boxes yourself. If you would rather write a sentence, paste your own
+      Anthropic API key and the boxes get filled for you. Check them before
+      you build. One request costs roughly a tenth of a US cent, so about
+      a thousand requests per dollar.
+    </p>
+    <p class="note small">
+      Your key is sent only to Anthropic, used once, and thrown away when
+      the request ends. It is never stored on this server and never
+      written to a log. It stays in this browser tab until you close it.
+    </p>
+
+    <label for="description" style="margin-top: 20px;">Describe the structure</label>
+    <textarea id="description" rows="3"
+      placeholder="A 4x4x4 BCC cell of W, Re and Ta at 70, 20 and 10 percent, lattice parameter 3.16"></textarea>
+
+    <label for="api_key">Anthropic API key</label>
+    <input type="password" id="api_key" class="wide"
+           placeholder="sk-ant-..." autocomplete="off">
+
+    <div class="button-group" style="margin-top: 20px;">
+      <button type="button" class="btn-secondary" id="fill"
+              onclick="fillForm()">Fill the form</button>
+    </div>
+    <p class="note small" id="assist_message" style="display: none;"></p>
+  </div>
 
   <form method="post" onsubmit="startWorking()">
 
@@ -616,6 +666,69 @@ PAGE = """
     }, 1000);
   }
 
+  // Keep the key for as long as this tab is open, so it does not have to
+  // be retyped after every build. sessionStorage is wiped when the tab
+  // closes. The key is never sent anywhere except to this app's /parse
+  // route, which passes it straight to Anthropic and then forgets it.
+  var keyBox = document.getElementById('api_key');
+  var saved = sessionStorage.getItem('api_key');
+  if (saved) { keyBox.value = saved; }
+  keyBox.addEventListener('input', function () {
+    sessionStorage.setItem('api_key', keyBox.value);
+  });
+
+  function say(message) {
+    var box = document.getElementById('assist_message');
+    box.textContent = message;
+    box.style.display = message ? 'block' : 'none';
+  }
+
+  // Send the sentence and the key to the server, then put the answer in
+  // the form boxes. Nothing is built here. The visitor still has to look
+  // at the boxes and press Build.
+  async function fillForm() {
+    var key = document.getElementById('api_key').value.trim();
+    var text = document.getElementById('description').value.trim();
+
+    if (!text) { say('Write a description first.'); return; }
+    if (!key) { say('Paste your API key, or fill the form below yourself.'); return; }
+
+    var button = document.getElementById('fill');
+    button.disabled = true;
+    say('Reading your description...');
+
+    try {
+      var reply = await fetch('/parse', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({api_key: key, description: text})
+      });
+      var data = await reply.json();
+
+      if (data.error) { say(data.error); return; }
+
+      document.getElementById('lattice').value = data.lattice;
+      document.getElementById('n_elements').value = data.elements.length;
+      showRows();
+      for (var n = 1; n <= data.elements.length; n++) {
+        document.getElementsByName('element_' + n)[0].value = data.elements[n - 1];
+        document.getElementsByName('percent_' + n)[0].value = data.percentages[n - 1];
+      }
+      document.getElementById('lattice_parameter').value = data.lattice_parameter;
+      document.getElementById('nx').value = data.supercell[0];
+      document.getElementById('ny').value = data.supercell[1];
+      document.getElementById('nz').value = data.supercell[2];
+      showAtoms();
+
+      say('Form filled. Check the values, then press Build structure.'
+          + (data.note ? ' ' + data.note : ''));
+    } catch (error) {
+      say('Could not reach the server. Try again.');
+    } finally {
+      button.disabled = false;
+    }
+  }
+
   // Turn the text held in a hidden box into a downloaded file. The file
   // is assembled in the browser, so the server never has to remember it.
   function saveFile(boxId, filename) {
@@ -666,6 +779,27 @@ def index():
                                   max_atoms=MAX_ATOMS, min_repeat=MIN_REPEAT,
                                   max_steps=MAX_STEPS,
                                   default_steps=DEFAULT_STEPS)
+
+
+@app.route("/parse", methods=["POST"])
+def parse():
+    """Turn a sentence into form values using the visitor's own API key.
+
+    The key arrives in the body of the request, never in the address, so
+    it cannot end up in a server log. It is used once and dropped when
+    this function returns. Nothing is built here.
+    """
+    data = request.get_json(silent=True) or {}
+    api_key = data.get("api_key", "").strip()
+    description = data.get("description", "").strip()
+
+    if not api_key or not description:
+        return jsonify({"error": "A description and an API key are both needed."})
+
+    try:
+        return jsonify(llm_fill.describe_to_form(api_key, description))
+    except ValueError as error:
+        return jsonify({"error": str(error)})
 
 
 if __name__ == "__main__":

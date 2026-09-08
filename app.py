@@ -172,9 +172,16 @@ def summary_text(result):
         lines.append("times better than best random : %.1f"
                      % result["better_than_best_random"])
     lines.append("")
-    lines.append("steps    : %d" % result["steps"])
-    lines.append("restarts : %d" % result["restarts"])
-    lines.append("seconds  : %.1f" % result["seconds"])
+    lines.append("swaps evaluated  : %d" % result["steps"])
+    lines.append("site pairs drawn : %d" % result["picks"])
+    lines.append("restarts         : %d" % result["restarts"])
+    lines.append("stopped on       : %s" % result["stopped_on"])
+    lines.append("seconds          : %.1f" % result["seconds"])
+    lines.append("")
+    lines.append("A pair drawn on two sites of the same element is discarded")
+    lines.append("without being evaluated, so a skewed composition draws many")
+    lines.append("more pairs than it evaluates. Only evaluated swaps count")
+    lines.append("towards the step budget.")
     return "\n".join(lines)
 
 

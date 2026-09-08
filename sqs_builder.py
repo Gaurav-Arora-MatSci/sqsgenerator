@@ -167,9 +167,17 @@ def report_text(build_id, lattice, lattice_parameter, supercell,
     lines.append("")
 
     lines.append("Search")
-    lines.append("  steps    : %d" % report["steps"])
-    lines.append("  restarts : %d" % report["restarts"])
-    lines.append("  seconds  : %.1f" % report["seconds"])
+    lines.append("  swaps evaluated : %d" % report["steps"])
+    lines.append("  site pairs drawn: %d" % report["picks"])
+    lines.append("  restarts        : %d" % report["restarts"])
+    lines.append("  stopped on      : %s" % report["stopped_on"])
+    lines.append("  seconds         : %.1f" % report["seconds"])
+    lines.append("")
+    lines.append("  A pair drawn on two sites of the same element is")
+    lines.append("  discarded without being evaluated, so on a skewed")
+    lines.append("  composition many more pairs are drawn than swaps are")
+    lines.append("  evaluated. Only evaluated swaps count towards the")
+    lines.append("  step budget.")
 
     return "\n".join(lines) + "\n"
 
@@ -187,7 +195,7 @@ def build_sqs(lattice,
               composition_mode="percent",
               supercell=(3, 3, 3),
               seed=None,
-              max_steps=500000,
+              max_steps=50000,
               output_path=None):
     """Build an SQS on a bcc or fcc lattice.
 
@@ -250,6 +258,8 @@ def build_sqs(lattice,
         "better_than_best_random": (None if report["better_than_best"] is None
                                     else round(report["better_than_best"], 1)),
         "steps": report["steps"],
+        "picks": report["picks"],
+        "stopped_on": report["stopped_on"],
         "restarts": report["restarts"],
         "seconds": round(report["seconds"], 1),
         "poscar": text,

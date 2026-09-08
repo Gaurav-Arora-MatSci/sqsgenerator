@@ -43,10 +43,16 @@ def random_baseline(counts, shells, used, n_species, conc, rng, n_trials=20):
 
 
 def search(frac, cell, a, lattice, counts,
-           max_steps=500000, stuck_limit=1000, seed=None):
+           max_steps=50000, stuck_limit=1000, seed=None):
     """
     Return the best configuration found and a report.
     Stops at max_steps, or earlier if the objective reaches zero.
+
+    A step means a swap that was actually evaluated. Picking two sites
+    that already hold the same species does no work, so it does not
+    count. That matters on a skewed composition: at 97 percent tungsten
+    both picks land on tungsten about 94 percent of the time, so an
+    earlier version reported 500000 steps after roughly 31000 real ones.
     """
     rng = np.random.default_rng(seed)
 
@@ -55,6 +61,8 @@ def search(frac, cell, a, lattice, counts,
     n_sites = len(frac)
     if sum(counts) != n_sites:
         raise ValueError("counts must add up to %d sites" % n_sites)
+    if sum(1 for c in counts if c > 0) < 2:
+        raise ValueError("at least two species must have atoms to swap")
 
     n_species = len(counts)
     conc = np.array(counts) / n_sites
@@ -72,19 +80,30 @@ def search(frac, cell, a, lattice, counts,
     best_alphas = alphas
 
     steps = 0
+    picks = 0
     restarts = 0
     rejections = 0
     start = time.time()
 
-    while steps < max_steps:
-        steps += 1
+    # A very dilute species can need hundreds of picks per useful swap.
+    # This ceiling stops the loop spinning forever in that case.
+    max_picks = 200 * max_steps
+    stopped_on = "steps"
 
-        # pick two sites holding different species
+    while steps < max_steps:
+        if picks >= max_picks:
+            stopped_on = "picks"
+            break
+
+        # A pick that lands on two sites of the same species does no
+        # work, so it is not counted as a step.
+        picks += 1
         i = rng.integers(n_sites)
         j = rng.integers(n_sites)
         if species[i] == species[j]:
             continue
 
+        steps += 1
         species[i], species[j] = species[j], species[i]
         trial, alphas = objective(species, shells, used, n_species, conc)
 
@@ -100,6 +119,7 @@ def search(frac, cell, a, lattice, counts,
             rejections += 1
 
         if best_value < 1e-9:
+            stopped_on = "perfect score"
             break
 
         if rejections >= stuck_limit:
@@ -130,6 +150,8 @@ def search(frac, cell, a, lattice, counts,
         "shells_used": used,
         "alphas": best_alphas,
         "steps": steps,
+        "picks": picks,
+        "stopped_on": stopped_on,
         "restarts": restarts,
         "seconds": time.time() - start,
     }

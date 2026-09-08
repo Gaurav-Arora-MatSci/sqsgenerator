@@ -798,7 +798,6 @@ def parse():
 
     try:
         values = llm_fill.describe_to_form(api_key, description,
-                                           MAX_ATOMS, MIN_REPEAT,
                                            ATOMS_PER_CELL)
         return jsonify(values)
     except ValueError as error:

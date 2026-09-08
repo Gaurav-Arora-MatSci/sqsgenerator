@@ -26,6 +26,14 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-key-not-for-public-use"
 # Hard limits on what the form will accept.
 MAX_ATOMS = 500
 MIN_REPEAT = 3
+
+# The step box starts at DEFAULT_STEPS and will not accept more than
+# MAX_STEPS. The ceiling exists because Cloudflare drops an HTTP request
+# after roughly 100 seconds. On a 500 atom cell, 50000 steps takes about
+# 6 seconds, so 500000 steps sits near 60 seconds and still returns in
+# time. A larger number would let the server finish a build the browser
+# has already given up on.
+DEFAULT_STEPS = 50000
 MAX_STEPS = 500000
 
 # Atoms per conventional cell, used to work out the total before building.
@@ -132,6 +140,14 @@ def read_form(form):
                 errors.append("That supercell holds %d atoms. The limit is %d."
                               % (total_atoms, MAX_ATOMS))
 
+    steps = read_number(form.get("steps", ""), "Search steps",
+                        errors, whole=True)
+    if steps is not None:
+        if steps < 1:
+            errors.append("Search steps must be at least 1.")
+        elif steps > MAX_STEPS:
+            errors.append("Search steps must be %d or fewer." % MAX_STEPS)
+
     # An empty seed box means no seed, so every build differs.
     seed = None
     seed_text = form.get("seed", "").strip()
@@ -149,7 +165,7 @@ def read_form(form):
         "composition_mode": "percent",
         "supercell": tuple(repeats) if None not in repeats else None,
         "seed": seed,
-        "max_steps": MAX_STEPS,
+        "max_steps": steps,
     }
     return settings, errors
 
@@ -453,8 +469,8 @@ PAGE = """
   <p class="note">
     Builds a special quasirandom structure on a BCC or FCC lattice.
     Every repeat must be at least {{ min_repeat }}, and the cell must hold
-    no more than {{ max_atoms }} atoms. The search runs for
-    {{ max_steps }} steps, or stops early if it reaches a perfect score.
+    no more than {{ max_atoms }} atoms. The search stops at the number of
+    steps you set, or earlier if it reaches a perfect score.
   </p>
 
   <form method="post" onsubmit="startWorking()">
@@ -504,6 +520,16 @@ PAGE = """
     <p class="note small" id="atom-count">
       Keep the cell close to cubic. A long thin cell cannot hold a good
       quasirandom structure.
+    </p>
+
+    <label for="steps">Search steps</label>
+    <input type="text" class="short" id="steps" name="steps"
+           value="{{ form.get('steps', default_steps) }}">
+    <p class="note small">
+      More steps give a lower objective, with diminishing returns. On a
+      {{ max_atoms }} atom cell, {{ default_steps }} steps takes about six
+      seconds. The largest value accepted is {{ max_steps }}, which keeps
+      the build inside the time a browser will wait.
     </p>
 
     <label for="seed">Seed, optional</label>
@@ -635,7 +661,8 @@ def index():
     return render_template_string(PAGE, summary=summary, build_id=build_id,
                                   errors=errors, form=form,
                                   max_atoms=MAX_ATOMS, min_repeat=MIN_REPEAT,
-                                  max_steps=MAX_STEPS)
+                                  max_steps=MAX_STEPS,
+                                  default_steps=DEFAULT_STEPS)
 
 
 def send(kind, filename):

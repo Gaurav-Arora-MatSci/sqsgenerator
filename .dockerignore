@@ -1,0 +1,10 @@
+# Anything listed here is not sent to Google when the image is built.
+# It keeps the upload small and stops local files leaking into the image.
+venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+diagnostics/
+POSCAR
+report.txt

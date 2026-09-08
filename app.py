@@ -6,61 +6,33 @@ the percentages, the lattice parameter and the supercell. The form is
 checked, the search runs, and the structure and the report are offered
 for download.
 
-Nothing is written to disk. Both files are held in memory until the
-visitor clicks download, then sent straight to their browser.
+The app keeps no state at all. The POSCAR and the report are placed in
+the result page itself, and the download buttons build the files in the
+visitor's browser. Nothing is stored on the server and nothing is
+written to disk, so any number of copies of this app can run side by
+side without knowing about each other. That is what lets it run on Cloud
+Run, which starts and stops containers as it likes.
 """
 
-import os
-import uuid
-
-from flask import Flask, request, render_template_string, session, Response
+from flask import Flask, request, render_template_string
 
 from sqs_builder import build_sqs, BASIS
 
 app = Flask(__name__)
-
-# Each visitor gets their own session cookie, signed with this key.
-# In production set FLASK_SECRET_KEY as an environment variable.
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-key-not-for-public-use")
 
 # Hard limits on what the form will accept.
 MAX_ATOMS = 500
 MIN_REPEAT = 3
 
 # The step box starts at DEFAULT_STEPS and will not accept more than
-# MAX_STEPS. The ceiling exists because Cloudflare drops an HTTP request
-# after roughly 100 seconds. On a 500 atom cell, 50000 steps takes about
-# 6 seconds, so 500000 steps sits near 60 seconds and still returns in
-# time. A larger number would let the server finish a build the browser
-# has already given up on.
+# MAX_STEPS. On a 500 atom cell, 50000 steps takes about 6 seconds, so
+# 500000 steps sits near 60 seconds and returns well inside the Cloud Run
+# request timeout.
 DEFAULT_STEPS = 50000
 MAX_STEPS = 500000
 
 # Atoms per conventional cell, used to work out the total before building.
 ATOMS_PER_CELL = {"bcc": 2, "fcc": 4}
-
-# Finished builds waiting to be downloaded, keyed by a random id.
-# The id goes in the visitor's cookie, the files stay here on the server.
-# This lives in one process, so run gunicorn with a single worker.
-#
-# Entries are not deleted on download. There are two files per build, so
-# deleting on the first click would break the second. Instead the oldest
-# entries are dropped once the cache is full, which also bounds memory.
-BUILDS = {}
-MAX_BUILDS_KEPT = 20
-
-
-def remember(poscar, notes):
-    """Store one finished build and return its download id."""
-    download_id = str(uuid.uuid4())
-    BUILDS[download_id] = {"poscar": poscar, "report": notes}
-
-    # Drop the oldest entries. Python dictionaries keep insertion order.
-    while len(BUILDS) > MAX_BUILDS_KEPT:
-        oldest = next(iter(BUILDS))
-        del BUILDS[oldest]
-
-    return download_id
 
 
 def read_number(text, name, errors, whole=False):
@@ -356,29 +328,32 @@ PAGE = """
       font-family: 'Inter', sans-serif;
     }
 
-    button[type=submit], .btn-primary {
+    /* Colour comes from the class, never from the element type. A type
+       selector such as button[type=button] would outrank .btn-primary and
+       quietly turn a primary button grey. */
+    .btn-primary {
       background: var(--accent);
       color: #0b1120;
       border-color: var(--accent);
     }
 
-    button[type=submit]:hover, .btn-primary:hover {
+    .btn-primary:hover {
       background: var(--accent-hover);
       border-color: var(--accent-hover);
     }
 
-    button[type=submit]:disabled {
+    .btn-primary:disabled {
       opacity: 0.5;
       cursor: default;
     }
 
-    button[type=button], .btn-secondary {
+    .btn-secondary {
       background: transparent;
       color: var(--text-muted);
       border-color: var(--input-border);
     }
 
-    button[type=button]:hover, .btn-secondary:hover {
+    .btn-secondary:hover {
       background: var(--input-border-hover);
       color: var(--text-main);
     }
@@ -453,6 +428,10 @@ PAGE = """
     }
 
     .problems ul { margin: 8px 0 0 0; padding-left: 22px; }
+
+    .hidden-text {
+      display: none;
+    }
 
     .id {
       font-family: 'JetBrains Mono', monospace;
@@ -542,8 +521,8 @@ PAGE = """
     </p>
 
     <div class="button-group">
-      <button type="submit" id="build">Build structure</button>
-      <button type="button" onclick="window.location='/'">Clear</button>
+      <button type="submit" id="build" class="btn-primary">Build structure</button>
+      <button type="button" class="btn-secondary" onclick="window.location='/'">Clear</button>
     </div>
 
     <div id="working">
@@ -577,9 +556,18 @@ PAGE = """
   {% if summary %}
     <h3>Result</h3>
     <pre>{{ summary }}</pre>
+
+    <!-- The two files travel inside the page. The boxes are hidden, and
+         the buttons below turn their contents into a download. The server
+         keeps no copy. -->
+    <textarea id="poscar_text" class="hidden-text">{{ poscar }}</textarea>
+    <textarea id="report_text" class="hidden-text">{{ report }}</textarea>
+
     <div class="button-group" style="margin-top: 24px;">
-      <a href="/download/poscar" class="btn-link btn-primary">Download POSCAR</a>
-      <a href="/download/report" class="btn-link btn-secondary">Download report.txt</a>
+      <button type="button" class="btn-primary"
+              onclick="saveFile('poscar_text', 'POSCAR')">Download POSCAR</button>
+      <button type="button" class="btn-secondary"
+              onclick="saveFile('report_text', 'report.txt')">Download report.txt</button>
     </div>
   {% endif %}
 </div>
@@ -628,6 +616,18 @@ PAGE = """
     }, 1000);
   }
 
+  // Turn the text held in a hidden box into a downloaded file. The file
+  // is assembled in the browser, so the server never has to remember it.
+  function saveFile(boxId, filename) {
+    var text = document.getElementById(boxId).value;
+    var blob = new Blob([text], {type: 'text/plain'});
+    var link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  }
+
   document.getElementById('lattice').addEventListener('change', showAtoms);
   showRows();
   showAtoms();
@@ -641,6 +641,8 @@ PAGE = """
 def index():
     summary = None
     build_id = None
+    poscar = None
+    report = None
     errors = []
     form = {"lattice": "bcc", "n_elements": "2"}
 
@@ -653,39 +655,17 @@ def index():
                 result = build_sqs(**settings)
                 summary = summary_text(result)
                 build_id = result["build_id"]
-                session["download_id"] = remember(result["poscar"],
-                                                  result["report_text"])
+                poscar = result["poscar"]
+                report = result["report_text"]
             except Exception as error:
                 errors.append("The build failed: %s" % error)
 
     return render_template_string(PAGE, summary=summary, build_id=build_id,
+                                  poscar=poscar, report=report,
                                   errors=errors, form=form,
                                   max_atoms=MAX_ATOMS, min_repeat=MIN_REPEAT,
                                   max_steps=MAX_STEPS,
                                   default_steps=DEFAULT_STEPS)
-
-
-def send(kind, filename):
-    """Send one file from the current visitor's most recent build."""
-    build = BUILDS.get(session.get("download_id"))
-    if build is None:
-        return "No structure ready. Build one first.", 404
-
-    return Response(
-        build[kind],
-        mimetype="text/plain",
-        headers={"Content-Disposition": "attachment; filename=%s" % filename},
-    )
-
-
-@app.route("/download/poscar")
-def download_poscar():
-    return send("poscar", "POSCAR")
-
-
-@app.route("/download/report")
-def download_report():
-    return send("report", "report.txt")
 
 
 if __name__ == "__main__":
